@@ -98,6 +98,23 @@ mod ancestor {
             }
             Ok(())
         }
+
+        fn check_only_commit_graph(&self) -> crate::Result {
+            let (store, tips, expected) = self.setup()?;
+
+            for use_commitgraph in [true] {
+                let oids = commit::Ancestors::new(tips.clone(), commit::ancestors::State::default(), |oid, buf| {
+                    store.find_commit_iter(oid, buf).map(|t| t.0)
+                })
+                .commit_graph(self.setup_commitgraph(store.store_ref(), use_commitgraph))
+                .sorting(self.sorting)?
+                .parents(self.mode)
+                .map(|res| res.map(|info| info.id))
+                .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(oids, expected);
+            }
+            Ok(())
+        }
     }
 
     mod different_date_intermixed {
@@ -174,6 +191,30 @@ mod ancestor {
                 ],
             )
             .check()
+        }
+
+        #[test]
+        fn head_children_first() -> crate::Result {
+            TraversalAssertion::new_at(
+                "make_repos.sh",
+                "simple",
+                &["f49838d84281c3988eeadd988d97dd358c9f9dc4"], /* merge */
+                // This is very different from what git does as it keeps commits together,
+                // whereas we spread them out breadth-first.
+                &[
+                    "66a309480201c4157b0eae86da69f2d606aadbe7", /* b1c2 */
+                    "48e8dac19508f4238f06c8de2b10301ce64a641c", /* b2c2 */
+                    "0edb95c0c0d9933d88f532ec08fcd405d0eee882", /* c5 */
+                    "80947acb398362d8236fcb8bf0f8a9dac640583f", /* b1c1 */
+                    "cb6a6befc0a852ac74d74e0354e0f004af29cb79", /* b2c1 */
+                    "8cb5f13b66ce52a49399a2c49f537ee2b812369c", /* c4 */
+                    "33aa07785dd667c0196064e3be3c51dd9b4744ef", /* c3 */
+                    "ad33ff2d0c4fc77d56b5fbff6f86f332fe792d83", /* c2 */
+                    "65d6af66f60b8e39fd1ba6a1423178831e764ec5", /* c1 */
+                ],
+            )
+            .with_sorting(Sorting::AllChildrenFirst)
+            .check_only_commit_graph()
         }
 
         #[test]

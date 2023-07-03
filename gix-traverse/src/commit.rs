@@ -45,6 +45,9 @@ pub enum Sorting {
     /// as it avoids overlapping branches.
     #[default]
     BreadthFirst,
+    /// Commits are sorted as they are with [`BreadthFirst`] but with a guarantee that
+    /// no commit is shown before all its children are.
+    AllChildrenFirst,
     /// Commits are sorted by their commit time in descending order, that is newest first.
     ///
     /// The sorting applies to all currently queued commit ids and thus is full.
@@ -111,6 +114,8 @@ pub mod ancestors {
         },
         #[error(transparent)]
         ObjectDecode(#[from] gix_object::decode::Error),
+        #[error("Ancestors configuration requires a commit graph")]
+        NeedCommitGraph,
     }
 
     /// The state used and potentially shared by multiple graph traversals.
@@ -118,8 +123,10 @@ pub mod ancestors {
     pub struct State {
         next: VecDeque<ObjectId>,
         queue: gix_revwalk::PriorityQueue<SecondsSinceUnixEpoch, ObjectId>,
+        generation_numbers: gix_hashtable::HashMap<ObjectId, u32>,
         buf: Vec<u8>,
         seen: HashSet<ObjectId>,
+        last_generation: u32,
         parents_buf: Vec<u8>,
         parent_ids: SmallVec<[(ObjectId, SecondsSinceUnixEpoch); 2]>,
     }
@@ -129,8 +136,10 @@ pub mod ancestors {
             State {
                 next: Default::default(),
                 queue: gix_revwalk::PriorityQueue::new(),
+                generation_numbers: gix_hashtable::HashMap::default(),
                 buf: vec![],
                 seen: Default::default(),
+                last_generation: gix_commitgraph::GENERATION_NUMBER_INFINITY,
                 parents_buf: vec![],
                 parent_ids: Default::default(),
             }
@@ -141,8 +150,10 @@ pub mod ancestors {
         fn clear(&mut self) {
             self.next.clear();
             self.queue.clear();
+            // self.generation_numbers intentionally not cleared
             self.buf.clear();
             self.seen.clear();
+            self.last_generation = gix_commitgraph::GENERATION_NUMBER_INFINITY;
         }
     }
 
@@ -159,6 +170,27 @@ pub mod ancestors {
             match self.sorting {
                 Sorting::BreadthFirst => {
                     self.queue_to_vecdeque();
+                }
+                Sorting::AllChildrenFirst => {
+                    let state = self.state.borrow_mut();
+                    for commit_id in state.next.drain(..) {
+                        let c = super::find(self.cache.as_ref(), &mut self.find, &commit_id, &mut state.buf).map_err(
+                            |err| Error::FindExisting {
+                                oid: commit_id,
+                                source: err.into(),
+                            },
+                        )?;
+                        match c {
+                            Either::CommitRefIter(_) => {
+                                // Fill missing generation numbers here
+                                todo!();
+                            }
+                            Either::CachedCommit(c) => {
+                                state.queue.insert(c.generation() as SecondsSinceUnixEpoch, commit_id);
+                                state.last_generation = std::cmp::min(state.last_generation, c.generation());
+                            }
+                        }
+                    }
                 }
                 Sorting::ByCommitTimeNewestFirst | Sorting::ByCommitTimeNewestFirstCutoffOlderThan { .. } => {
                     let cutoff_time = self.sorting.cutoff_time();
@@ -318,6 +350,7 @@ pub mod ancestors {
             } else {
                 match self.sorting {
                     Sorting::BreadthFirst => self.next_by_topology(),
+                    Sorting::AllChildrenFirst => self.next_by_generation(),
                     Sorting::ByCommitTimeNewestFirst => self.next_by_commit_date(None),
                     Sorting::ByCommitTimeNewestFirstCutoffOlderThan { seconds } => {
                         self.next_by_commit_date(seconds.into())
@@ -468,6 +501,45 @@ pub mod ancestors {
                         }
                     }
                 }
+                Err(err) => {
+                    return Some(Err(Error::FindExisting {
+                        oid,
+                        source: err.into(),
+                    }))
+                }
+            }
+            Some(Ok(Info {
+                id: oid,
+                parent_ids: parents,
+                commit_time: None,
+            }))
+        }
+
+        fn next_by_generation(&mut self) -> Option<Result<Info, Error>> {
+            let state = self.state.borrow_mut();
+            let (_generation, oid) = state.queue.pop()?;
+            let mut parents: ParentIds = Default::default();
+            match super::find(self.cache.as_ref(), &mut self.find, &oid, &mut state.buf) {
+                Ok(Either::CachedCommit(commit)) => {
+                    if !collect_parents(&mut state.parent_ids, self.cache.as_ref(), commit.iter_parents(), |p| {
+                        p.generation() as SecondsSinceUnixEpoch
+                    }) {
+                        // drop corrupt caches and try again with ODB
+                        self.cache = None;
+                        return self.next_by_generation();
+                    }
+
+                    for (id, parent_gen) in state.parent_ids.drain(..) {
+                        parents.push(id);
+
+                        let was_inserted = state.seen.insert(id);
+                        if !(was_inserted && (self.predicate)(&id)) {
+                            continue;
+                        }
+                        state.queue.insert(parent_gen, id);
+                    }
+                }
+                Ok(Either::CommitRefIter(_)) => return Some(Err(Error::NeedCommitGraph)),
                 Err(err) => {
                     return Some(Err(Error::FindExisting {
                         oid,

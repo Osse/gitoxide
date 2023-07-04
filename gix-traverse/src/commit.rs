@@ -355,7 +355,9 @@ pub mod ancestors {
             let mut parents: ParentIds = Default::default();
             match super::find(self.cache.as_ref(), &mut self.find, &oid, &mut state.buf) {
                 Ok(Either::CachedCommit(commit)) => {
-                    if !collect_parents(&mut state.parent_ids, self.cache.as_ref(), commit.iter_parents()) {
+                    if !collect_parents(&mut state.parent_ids, self.cache.as_ref(), commit.iter_parents(), |p| {
+                        p.committer_timestamp() as SecondsSinceUnixEpoch
+                    }) {
                         // drop corrupt caches and try again with ODB
                         self.cache = None;
                         return self.next_by_commit_date(cutoff_older_than);
@@ -428,7 +430,9 @@ pub mod ancestors {
             let mut parents: ParentIds = Default::default();
             match super::find(self.cache.as_ref(), &mut self.find, &oid, &mut state.buf) {
                 Ok(Either::CachedCommit(commit)) => {
-                    if !collect_parents(&mut state.parent_ids, self.cache.as_ref(), commit.iter_parents()) {
+                    if !collect_parents(&mut state.parent_ids, self.cache.as_ref(), commit.iter_parents(), |p| {
+                        p.committer_timestamp() as SecondsSinceUnixEpoch
+                    }) {
                         // drop corrupt caches and try again with ODB
                         self.cache = None;
                         return self.next_by_topology();
@@ -485,21 +489,22 @@ enum Either<'buf, 'cache> {
     CachedCommit(gix_commitgraph::file::Commit<'cache>),
 }
 
-fn collect_parents(
-    dest: &mut SmallVec<[(gix_hash::ObjectId, gix_date::SecondsSinceUnixEpoch); 2]>,
-    cache: Option<&gix_commitgraph::Graph>,
+fn collect_parents<'a, T, F>(
+    dest: &mut SmallVec<[(gix_hash::ObjectId, T); 2]>,
+    cache: Option<&'a gix_commitgraph::Graph>,
     parents: gix_commitgraph::file::commit::Parents<'_>,
-) -> bool {
+    get: F,
+) -> bool
+where
+    F: Fn(&gix_commitgraph::file::Commit<'a>) -> T,
+{
     dest.clear();
     let cache = cache.as_ref().expect("parents iter is available, backed by `cache`");
     for parent_id in parents {
         match parent_id {
             Ok(pos) => dest.push({
                 let parent = cache.commit_at(pos);
-                (
-                    parent.id().to_owned(),
-                    parent.committer_timestamp() as gix_date::SecondsSinceUnixEpoch, // we can't handle errors here and trying seems overkill
-                )
+                (parent.id().to_owned(), get(&parent))
             }),
             Err(_err) => return false,
         }

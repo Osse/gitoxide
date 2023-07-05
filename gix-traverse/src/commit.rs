@@ -164,12 +164,16 @@ pub mod ancestors {
                     let cutoff_time = self.sorting.cutoff_time();
                     let state = self.state.borrow_mut();
                     for commit_id in state.next.drain(..) {
-                        let commit_iter =
-                            (self.find)(&commit_id, &mut state.buf).map_err(|err| Error::FindExisting {
+                        let c = super::find(self.cache.as_ref(), &mut self.find, &commit_id, &mut state.buf).map_err(
+                            |err| Error::FindExisting {
                                 oid: commit_id,
                                 source: err.into(),
-                            })?;
-                        let time = commit_iter.committer()?.time.seconds;
+                            },
+                        )?;
+                        let time = match c {
+                            Either::CommitRefIter(c) => c.committer()?.time.seconds,
+                            Either::CachedCommit(c) => c.committer_timestamp() as SecondsSinceUnixEpoch,
+                        };
                         match cutoff_time {
                             Some(cutoff_time) if time >= cutoff_time => {
                                 state.queue.insert(time, commit_id);

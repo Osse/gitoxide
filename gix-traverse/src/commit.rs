@@ -124,6 +124,7 @@ pub mod ancestors {
         next: VecDeque<ObjectId>,
         queue: gix_revwalk::PriorityQueue<SecondsSinceUnixEpoch, ObjectId>,
         generation_numbers: gix_hashtable::HashMap<ObjectId, u32>,
+        indegree_numbers: gix_hashtable::HashMap<ObjectId, i32>,
         buf: Vec<u8>,
         seen: HashSet<ObjectId>,
         last_generation: u32,
@@ -137,6 +138,7 @@ pub mod ancestors {
                 next: Default::default(),
                 queue: gix_revwalk::PriorityQueue::new(),
                 generation_numbers: gix_hashtable::HashMap::default(),
+                indegree_numbers: gix_hashtable::HashMap::default(),
                 buf: vec![],
                 seen: Default::default(),
                 last_generation: gix_commitgraph::GENERATION_NUMBER_INFINITY,
@@ -151,6 +153,7 @@ pub mod ancestors {
             self.next.clear();
             self.queue.clear();
             // self.generation_numbers intentionally not cleared
+            // self.indegree_numbers intentionally not cleared
             self.buf.clear();
             self.seen.clear();
             self.last_generation = gix_commitgraph::GENERATION_NUMBER_INFINITY;
@@ -180,16 +183,18 @@ pub mod ancestors {
                                 source: err.into(),
                             },
                         )?;
-                        match c {
-                            Either::CommitRefIter(_) => {
-                                // Fill missing generation numbers here
-                                todo!();
+                        let g = match c {
+                            Either::CommitRefIter(c) => {
+                                let e = state.generation_numbers.entry(commit_id);
+                                match e {
+                                    gix_hashtable::hash_map::Entry::Occupied(o) => *o.get(),
+                                    gix_hashtable::hash_map::Entry::Vacant(v) => *v.insert(0),
+                                }
                             }
-                            Either::CachedCommit(c) => {
-                                state.queue.insert(c.generation() as SecondsSinceUnixEpoch, commit_id);
-                                state.last_generation = std::cmp::min(state.last_generation, c.generation());
-                            }
-                        }
+                            Either::CachedCommit(c) => c.generation(),
+                        };
+                        state.queue.insert(g as SecondsSinceUnixEpoch, commit_id);
+                        state.last_generation = std::cmp::min(state.last_generation, g);
                     }
                 }
                 Sorting::ByCommitTimeNewestFirst | Sorting::ByCommitTimeNewestFirstCutoffOlderThan { .. } => {
@@ -539,7 +544,25 @@ pub mod ancestors {
                         state.queue.insert(parent_gen, id);
                     }
                 }
-                Ok(Either::CommitRefIter(_)) => return Some(Err(Error::NeedCommitGraph)),
+                Ok(Either::CommitRefIter(commit_iter)) => {
+                    for token in commit_iter {
+                        match token {
+                            Ok(gix_object::commit::ref_iter::Token::Tree { .. }) => continue,
+                            Ok(gix_object::commit::ref_iter::Token::Parent { id }) => {
+                                parents.push(id);
+                                let was_inserted = state.seen.insert(id);
+                                if was_inserted && (self.predicate)(&id) {
+                                    state.next.push_back(id);
+                                }
+                                if matches!(self.parents, Parents::First) {
+                                    break;
+                                }
+                            }
+                            Ok(_a_token_past_the_parents) => break,
+                            Err(err) => return Some(Err(err.into())),
+                        }
+                    }
+                }
                 Err(err) => {
                     return Some(Err(Error::FindExisting {
                         oid,

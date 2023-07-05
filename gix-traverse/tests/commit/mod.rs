@@ -214,7 +214,7 @@ mod ancestor {
                 ],
             )
             .with_sorting(Sorting::AllChildrenFirst)
-            .check_only_commit_graph()
+            .check()
         }
 
         #[test]

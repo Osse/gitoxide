@@ -5,5 +5,8 @@
 /// Commit traversal
 pub mod commit;
 
+/// Topological commit traversal
+pub mod topo;
+
 /// Tree traversal
 pub mod tree;

@@ -956,6 +956,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "flagset"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d52a7e408202050813e6f1d9addadcaafef3dca7530c7ddfb005d4081cce6779"
+
+[[package]]
 name = "flate2"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2410,6 +2416,7 @@ dependencies = [
 name = "gix-traverse"
 version = "0.33.0"
 dependencies = [
+ "flagset",
  "gix-commitgraph",
  "gix-date 0.8.0",
  "gix-hash 0.13.0",

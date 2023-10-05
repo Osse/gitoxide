@@ -163,53 +163,61 @@ impl<'repo> Platform<'repo> {
             use_commit_graph,
             commit_graph,
         } = self;
-        Ok(revision::Walk {
-            repo,
-            inner: Box::new(
-                gix_traverse::commit::Ancestors::filtered(
-                    tips,
-                    gix_traverse::commit::ancestors::State::default(),
-                    move |oid, buf| repo.objects.find_commit_iter(oid, buf),
-                    {
-                        // Note that specific shallow handling for commit-graphs isn't needed as these contain
-                        // all information there is, and exclude shallow parents to be structurally consistent.
-                        let shallow_commits = repo.shallow_commits()?;
-                        let mut grafted_parents_to_skip = Vec::new();
-                        let mut buf = Vec::new();
-                        move |id| {
-                            if !filter(id) {
-                                return false;
-                            }
-                            match shallow_commits.as_ref() {
-                                Some(commits) => {
-                                    let id = id.to_owned();
-                                    if let Ok(idx) = grafted_parents_to_skip.binary_search(&id) {
-                                        grafted_parents_to_skip.remove(idx);
+        match sorting {
+            gix_traverse::commit::Sorting::AllChildrenFirst => Ok(revision::Walk {
+                repo,
+                inner: Box::new(gix_traverse::commit::TopoWalk::on_repo(repo, tips)),
+            }),
+            _ => {
+                Ok(revision::Walk {
+                    repo,
+                    inner: Box::new(
+                        gix_traverse::commit::Ancestors::filtered(
+                            tips,
+                            gix_traverse::commit::ancestors::State::default(),
+                            move |oid, buf| repo.objects.find_commit_iter(oid, buf),
+                            {
+                                // Note that specific shallow handling for commit-graphs isn't needed as these contain
+                                // all information there is, and exclude shallow parents to be structurally consistent.
+                                let shallow_commits = repo.shallow_commits()?;
+                                let mut grafted_parents_to_skip = Vec::new();
+                                let mut buf = Vec::new();
+                                move |id| {
+                                    if !filter(id) {
                                         return false;
-                                    };
-                                    if commits.binary_search(&id).is_ok() {
-                                        if let Ok(commit) = repo.objects.find_commit_iter(&id, &mut buf) {
-                                            grafted_parents_to_skip.extend(commit.parent_ids());
-                                            grafted_parents_to_skip.sort();
+                                    }
+                                    match shallow_commits.as_ref() {
+                                        Some(commits) => {
+                                            let id = id.to_owned();
+                                            if let Ok(idx) = grafted_parents_to_skip.binary_search(&id) {
+                                                grafted_parents_to_skip.remove(idx);
+                                                return false;
+                                            };
+                                            if commits.binary_search(&id).is_ok() {
+                                                if let Ok(commit) = repo.objects.find_commit_iter(&id, &mut buf) {
+                                                    grafted_parents_to_skip.extend(commit.parent_ids());
+                                                    grafted_parents_to_skip.sort();
+                                                }
+                                            };
+                                            true
                                         }
-                                    };
-                                    true
+                                        None => true,
+                                    }
                                 }
-                                None => true,
-                            }
-                        }
-                    },
-                )
-                .sorting(sorting)?
-                .parents(parents)
-                .commit_graph(
-                    commit_graph.or(use_commit_graph
-                        .map_or_else(|| self.repo.config.may_use_commit_graph(), Ok)?
-                        .then(|| self.repo.commit_graph().ok())
-                        .flatten()),
-                ),
-            ),
-        })
+                            },
+                        )
+                        .sorting(sorting)?
+                        .parents(parents)
+                        .commit_graph(
+                            commit_graph.or(use_commit_graph
+                                .map_or_else(|| self.repo.config.may_use_commit_graph(), Ok)?
+                                .then(|| self.repo.commit_graph().ok())
+                                .flatten()),
+                        ),
+                    ),
+                })
+            }
+        }
     }
     /// Return an iterator to traverse all commits reachable as configured by the [Platform].
     ///

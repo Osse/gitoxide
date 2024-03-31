@@ -10,6 +10,8 @@ pub enum Error {
     #[error(transparent)]
     AncestorIter(#[from] gix_traverse::commit::ancestors::Error),
     #[error(transparent)]
+    TopoIter(#[from] gix_traverse::commit::topo::Error),
+    #[error(transparent)]
     ShallowCommits(#[from] crate::shallow::open::Error),
     #[error(transparent)]
     ConfigBoolean(#[from] crate::config::boolean::Error),
@@ -220,6 +222,42 @@ impl<'repo> Platform<'repo> {
     pub fn all(self) -> Result<revision::Walk<'repo>, Error> {
         self.selected(|_| true)
     }
+    /// Return an iterator to traverse all commits reachable as configured by
+    /// the [Platform] in a topological order.
+    ///
+    /// # Performance
+    ///
+    /// It's highly recommended to set an [`object cache`][Repository::object_cache_size()] on the parent repo
+    /// to greatly speed up performance if the returned id is supposed to be looked up right after.
+    pub fn topo(self, filter: impl FnMut(&gix_hash::oid) -> bool + 'repo) -> Result<revision::TopoWalk<'repo>, Error> {
+        let Platform {
+            repo,
+            tips,
+            sorting,
+            parents,
+            use_commit_graph,
+            commit_graph,
+        } = self;
+        Ok(revision::TopoWalk {
+            repo,
+            inner: Box::new(
+                gix_traverse::commit::topo::Builder::from_iters(&repo.objects, tips, Option::<Option<ObjectId>>::None)
+                    .sorting(match sorting {
+                        gix_traverse::commit::Sorting::BreadthFirst => gix_traverse::commit::topo::Sorting::TopoOrder,
+                        _ => gix_traverse::commit::topo::Sorting::DateOrder,
+                    })
+                    .parents(parents)
+                    .with_predicate(filter)
+                    .with_commit_graph(
+                        commit_graph.or(use_commit_graph
+                            .map_or_else(|| self.repo.config.may_use_commit_graph(), Ok)?
+                            .then(|| self.repo.commit_graph().ok())
+                            .flatten()),
+                    )
+                    .build()?,
+            ),
+        })
+    }
 }
 
 pub(crate) mod iter {
@@ -233,6 +271,23 @@ pub(crate) mod iter {
 
     impl<'repo> Iterator for Walk<'repo> {
         type Item = Result<super::Info<'repo>, gix_traverse::commit::ancestors::Error>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner
+                .next()
+                .map(|res| res.map(|info| super::Info::new(info, self.repo)))
+        }
+    }
+
+    /// The iterator returned by [`crate::revision::walk::Platform::topo()`].
+    pub struct TopoWalk<'repo> {
+        pub(crate) repo: &'repo crate::Repository,
+        pub(crate) inner:
+            Box<dyn Iterator<Item = Result<gix_traverse::commit::Info, gix_traverse::commit::topo::Error>> + 'repo>,
+    }
+
+    impl<'repo> Iterator for TopoWalk<'repo> {
+        type Item = Result<super::Info<'repo>, gix_traverse::commit::topo::Error>;
 
         fn next(&mut self) -> Option<Self::Item> {
             self.inner
